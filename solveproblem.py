@@ -2,6 +2,7 @@ import pandas as pd
 import itertools
 
 from pulp import *
+from openpyxl import load_workbook
 
 
 def read_data():
@@ -40,7 +41,10 @@ def create_problem_binary(data, switch_costs, source=123, target=127):
 
     graph_edges = list(itertools.permutations(data.index.tolist(), 2))
     nodes = data.index.tolist()
-    nodes = [source] + [n for n in nodes if n not in [source, target]] + [target]
+
+    if source:
+        import ipdb; ipdb.set_trace()
+        nodes = [source] + [n for n in nodes if n not in [source, target]] + [target]
 
     var_dict = {}
     for cpc1, cpc2 in graph_edges:
@@ -81,12 +85,20 @@ def create_problem_binary(data, switch_costs, source=123, target=127):
     return prob, var_dict
 
 
-def solve_problem(cost, source, target):
+def solve_problem(cost, row_from=None, row_until=None, source=None, target=None):
     """solves problem given cost and start-end
     """
 
     data = read_data()
+
+    if source is None:
+        start = data.loc[data['Ordinamento']==row_from].index[0]
+        limit = data.loc[data['Ordinamento']==row_until].index[0]
+        data = data.loc[start:limit].copy()
+    
     data.set_index('CPC', inplace=True)
+    data.drop('Ordinamento', axis=1, inplace=True)
+
     switch_costs = calculate_switch_costs(cost, data)
     prob, var_dict = create_problem_binary(data, switch_costs, source=source, target=target)
     prob.solve()
@@ -96,6 +108,9 @@ def solve_problem(cost, source, target):
         [[couple[0], couple[1], var_dict[couple].value()] for couple in var_dict],
         columns=['cpc1', 'cpc2', 'value'])
     sol = sol.loc[sol.value>0]
+    
+    if source is None:
+        source = data.index[0]
     order = [source]
 
     while len(order)<=len(sol):
@@ -108,17 +123,43 @@ def solve_problem(cost, source, target):
     return order
 
 
-def test_all_combos(cost):
-    """tests all possible combinations of source and target
+def export_result(order):
+    """Exports result to excel
     """
-    data = read_data()
-    nodes = data['CPC'].tolist()
 
-    for source in nodes:
-        for target in nodes:
-            if source!=target:
-                print('Source', source, 'Target', target)
-                order = solve_problem(cost, source, target)
+    file_path = 'Ordinamento.xlsx'
+
+    data = read_data()
+
+    order = pd.Series(order).unique()
+    to_change = data.loc[data['CPC'].isin(order)]
+    remain_same = data.loc[~data['CPC'].isin(order)]
+    to_change = to_change.set_index('CPC').loc[order].reset_index().reset_index()
+    to_change['index'] = to_change['index']+1
+
+    new_data = remain_same.append(to_change)
+    new_data = new_data.sort_values('Ordinamento')
+    new_data['index'] = new_data['index'].fillna(new_data['Ordinamento']).astype(int)
+    
+    new_data = new_data.drop('Ordinamento', axis=1)
+    new_data = new_data.rename(columns={'index': 'Ordinamento'})
+
+    new_data = new_data[
+        ['Ordinamento', 'CPC'] + 
+        [col for col in new_data.columns if col not in ['Ordinamento', 'CPC']]]
+    new_data = new_data.replace(0, pd.np.nan)
+
+    book = load_workbook(file_path)
+    if 'results' in book.get_sheet_names():
+        book.remove_sheet(book.get_sheet_by_name('results'))
+        book.save(file_path)
+        book = load_workbook(file_path)
+    
+    writer = pd.ExcelWriter(file_path, engine='openpyxl')
+    writer.book = book
+
+    new_data.to_excel(writer, 'results', index=False)
+    writer.save()
 
 
 if __name__=='__main__':
@@ -129,8 +170,12 @@ if __name__=='__main__':
             'TipoColori': 7,
             }
 
-    source = 125  # macchina da cui partire
-    target = 133  # macchina a cui finire
-    order = solve_problem(cost, source, target)
+    # row_from = 1  # riordina da qui
+    # row_until = 15  # riordina fino a 
     
+    row_from = int(input('Specificare riga di inizio: '))
+    row_until = int(input('Specificare riga di fine: '))
+
+    order = solve_problem(cost, row_from, row_until)
+    export_result(order)    
 
