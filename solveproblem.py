@@ -1,5 +1,6 @@
 import pandas as pd
 import itertools
+import sys
 
 from pulp import *
 from openpyxl import load_workbook
@@ -173,8 +174,13 @@ if __name__=='__main__':
     
     file_path = input('Path del file Excel: ')
     if file_path=='':
-        file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                 'Ordinamento.xlsx')
+        if getattr(sys, 'frozen', False):
+            # frozen
+            dir_ = os.path.dirname(sys.executable)
+        else:
+            # unfrozen
+            dir_ = os.path.dirname(os.path.realpath(__file__))
+        file_path = os.path.join(dir_, 'Ordinamento.xlsx')
         print(file_path)
 
     row_from = int(input('Specificare riga di inizio: '))
