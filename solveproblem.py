@@ -5,8 +5,8 @@ from pulp import *
 from openpyxl import load_workbook
 
 
-def read_data():
-    file_obj = pd.ExcelFile('Ordinamento.xlsx')
+def read_data(file_path):
+    file_obj = pd.ExcelFile(file_path)
     data = pd.read_excel(file_obj, 'data').fillna(0)
     return data
 
@@ -85,11 +85,11 @@ def create_problem_binary(data, switch_costs, source=123, target=127):
     return prob, var_dict
 
 
-def solve_problem(cost, row_from=None, row_until=None, source=None, target=None):
+def solve_problem(file_path, cost, row_from=None, row_until=None, source=None, target=None):
     """solves problem given cost and start-end
     """
 
-    data = read_data()
+    data = read_data(file_path)
 
     if source is None:
         start = data.loc[data['Ordinamento']==row_from].index[0]
@@ -123,13 +123,11 @@ def solve_problem(cost, row_from=None, row_until=None, source=None, target=None)
     return order
 
 
-def export_result(order):
+def export_result(order, file_path):
     """Exports result to excel
     """
 
-    file_path = 'Ordinamento.xlsx'
-
-    data = read_data()
+    data = read_data(file_path)
 
     order = pd.Series(order).unique()
     to_change = data.loc[data['CPC'].isin(order)]
@@ -173,9 +171,16 @@ if __name__=='__main__':
     # row_from = 1  # riordina da qui
     # row_until = 15  # riordina fino a 
     
+    file_path = input('Path del file Excel: ')
+    if file_path=='':
+        file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 'Ordinamento.xlsx')
+        print(file_path)
+
     row_from = int(input('Specificare riga di inizio: '))
     row_until = int(input('Specificare riga di fine: '))
+    
 
-    order = solve_problem(cost, row_from, row_until)
-    export_result(order)    
+    order = solve_problem(file_path, cost, row_from, row_until)
+    export_result(order, file_path)    
 
