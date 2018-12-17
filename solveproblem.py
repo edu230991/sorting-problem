@@ -137,7 +137,7 @@ def export_result(order):
     to_change = to_change.set_index('CPC').loc[order].reset_index().reset_index()
     to_change['index'] = to_change['index']+1
 
-    new_data = remain_same.append(to_change)
+    new_data = remain_same.append(to_change, sort=False)
     new_data = new_data.sort_values('Ordinamento')
     new_data['index'] = new_data['index'].fillna(new_data['Ordinamento']).astype(int)
     
