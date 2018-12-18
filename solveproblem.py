@@ -2,6 +2,7 @@ import pandas as pd
 import sys
 import os
 import time
+import pyodbc
 
 from pulp import *
 from openpyxl import load_workbook
@@ -15,23 +16,51 @@ To clean installation from 32 bit software:
 https://support.microsoft.com/en-us/help/17588/fix-problems-that-block-programs-from-being-installed-or-removed
 """
 
+
+def read_data_from_access(path, table):
+    """
+    reads table from provided access db path into pandas dataframe
+    """
+    string = (r'Driver={Microsoft Access Driver (*.mdb, *.accdb)};'+
+              'DBQ=' + path)
+    conn = pyodbc.connect(string)
+    cursor = conn.cursor()
+
+    query = f'select * from {table}'  # Q_EstraiPerOrdinamento, Variabili
+    cursor.execute(query)
+
+    data = cursor.fetchall()
+    conn.close()
+
+    columns = [c[0] for c in cursor.description]
+    types = [c[1] for c in cursor.description]
+
+    df = pd.DataFrame([list(row) for row in data], columns=columns)
+    for i in range(len(columns)):
+        if types[i] in [decimal.Decimal, int]:
+            df[columns[i]] = df[columns[i]].astype(float)
+    return df
+
+
 def read_data(file_path, db=False, cost=False, filter_columns=True):
     if db:
-        pass
+        data = read_data_from_access(path, 'Q_EstraiPerOrdinamento')
+        columns_data = read_data_from_access(path, 'Variabili')
     else:
         file_obj = pd.ExcelFile(file_path)
         columns_data = pd.read_excel(file_obj, 'Variabili')
         
         data = pd.read_excel(file_obj, 'Foglio1')
-        data.columns = [c.lower() for c in data.columns]
+        
+    data.columns = [c.lower() for c in data.columns]
+    columns_data['Variabile'] = columns_data['Variabile'].str.lower()
+    to_consider = columns_data.loc[
+        columns_data['ConsideraInOttimizzazione 1/0']==1, 
+        'Variabile'].tolist()
+    data = data.set_index('prog')
+    if filter_columns:
+        data = data[to_consider].copy()
 
-        columns_data['Variabile'] = columns_data['Variabile'].str.lower()
-        to_consider = columns_data.loc[
-            columns_data['ConsideraInOttimizzazione 1/0']==1, 
-            'Variabile'].tolist()
-        data = data.set_index('prog')
-        if filter_columns:
-            data = data[to_consider].copy()
     if cost:
         cost_series = columns_data[
             ['Variabile', 'ValoreCostoCambio', 'Svuota', 'Riempi', 'CambioManica']].set_index('Variabile')
