@@ -1,36 +1,74 @@
 import pandas as pd
 import itertools
 import sys
+import time
 
 from pulp import *
 from openpyxl import load_workbook
 
 
-def read_data(file_path):
-    file_obj = pd.ExcelFile(file_path)
-    data = pd.read_excel(file_obj, 'data').fillna(0)
-    return data
+def read_data(file_path, db=False, cost=False, filter_columns=True):
+    if db:
+        pass
+    else:
+        file_obj = pd.ExcelFile(file_path)
+        columns_data = pd.read_excel(file_obj, 'Variabili')
+        
+        data = pd.read_excel(file_obj, 'Foglio1')
+        data.columns = [c.lower() for c in data.columns]
+
+        columns_data['Variabile'] = columns_data['Variabile'].str.lower()
+        to_consider = columns_data.loc[
+            columns_data['ConsideraInOttimizzazione 1/0']==1, 
+            'Variabile'].tolist()
+        data = data.set_index('prog')
+        if filter_columns:
+            data = data[to_consider].copy()
+    if cost:
+        cost_series = columns_data[
+            ['Variabile', 'ValoreCostoCambio', 'Svuota', 'Riempi', 'CambioManica']].set_index('Variabile')
+        return cost_series
+    else:
+        return data
 
 
-def calculate_switch_costs(cost, data):
+def calculate_switch_costs(data, file_path, db):
     """calculates cost for switching between any two configurations
     """
 
-    index = data.columns
-    cost_series = []
-    for col in data.columns:
-        if col in cost:
-            cost_series.append(cost[col])  # TipoColori or Carta
-        else:
-            cost_series.append(cost[col[0]])  # A or B 
-    cost_series = pd.Series(cost_series, index=index)
-    
+    cost_series = read_data(file_path, db=db, cost=True)
+
     switch_costs = {}
     for cpc1, row1 in data.iterrows():
         for cpc2, row2 in data.iterrows():
             # cost is zero if rows are identical, else depends on column
-            switch_cost = ((~(row1==row2))*1*cost_series).sum()
-            switch_costs[(row1.name, row2.name)] = switch_cost    
+            if cpc1!=cpc2:
+                row1_copy = row1.fillna(row2)
+                row2_copy = row2.fillna(row1)
+
+                switch_cost = ((~(row1_copy==row2_copy))*1*cost_series[
+                    'ValoreCostoCambio']).sum()
+                
+                # handle nans
+                with_nans = (pd.isnull(row1) | pd.isnull(row2))
+                
+                if with_nans.any():
+                    sel_1 = row1[row1.index[with_nans]]
+                    sel_2 = row2[row2.index[with_nans]]
+
+                    if ((pd.isnull(sel_1).any()) & 
+                        (not pd.isnull(sel_2).any())):
+                        # riempi 
+                        switch_cost += cost_series.loc[row1.index[with_nans], 
+                                                    'Riempi'].sum()
+                    elif ((pd.isnull(sel_2).any()) & 
+                          (not pd.isnull(sel_1).any())):
+                        # svuota 
+                        switch_cost += cost_series.loc[row2.index[with_nans], 
+                                                    'Svuota'].sum()               
+                
+                switch_costs[(row1.name, row2.name)] = switch_cost 
+
     return switch_costs
 
 
@@ -44,7 +82,6 @@ def create_problem_binary(data, switch_costs, source=123, target=127):
     nodes = data.index.tolist()
 
     if source:
-        import ipdb; ipdb.set_trace()
         nodes = [source] + [n for n in nodes if n not in [source, target]] + [target]
 
     var_dict = {}
@@ -86,28 +123,27 @@ def create_problem_binary(data, switch_costs, source=123, target=127):
     return prob, var_dict
 
 
-def solve_problem(file_path, cost, row_from=None, row_until=None, source=None, target=None):
+def solve_problem(file_path, row_from=None, row_until=None, source=None, target=None):
     """solves problem given cost and start-end
     """
 
-    data = read_data(file_path)
+    db = ('accdb' in file_path)
+    data = read_data(file_path, db=db)
 
     if source is None:
-        start = data.loc[data['Ordinamento']==row_from].index[0]
-        limit = data.loc[data['Ordinamento']==row_until].index[0]
-        data = data.loc[start:limit].copy()
-    
-    data.set_index('CPC', inplace=True)
-    data.drop('Ordinamento', axis=1, inplace=True)
-
-    switch_costs = calculate_switch_costs(cost, data)
+        data = data.loc[row_from:row_until].copy()
+    print(f'Sorting {len(data)} rows')
+    switch_costs = calculate_switch_costs(data, file_path, db)
     prob, var_dict = create_problem_binary(data, switch_costs, source=source, target=target)
-    prob.solve()
+    start = time.time()
+    prob.solve()  # takes kwargs, check solve_CBC
+    
     print("Status:", LpStatus[prob.status])
+    print("Elapsed", round(time.time()-start, 2), "seconds")
 
     sol = pd.DataFrame(
         [[couple[0], couple[1], var_dict[couple].value()] for couple in var_dict],
-        columns=['cpc1', 'cpc2', 'value'])
+        columns=['da', 'a', 'value'])
     sol = sol.loc[sol.value>0]
     
     if source is None:
@@ -115,42 +151,47 @@ def solve_problem(file_path, cost, row_from=None, row_until=None, source=None, t
     order = [source]
 
     while len(order)<=len(sol):
-        next_value = sol.loc[sol.cpc1==order[-1], 'cpc2'].values[0]
+        next_value = sol.loc[sol.da==order[-1], 'a'].values[0]
         order.append(next_value)
 
     print('Ordine ottimale:')
     print(order)
     print('Costo minimo:', prob.objective.value())
-    return order
+
+    export_result(order, file_path, db, switch_costs)
+    return True
 
 
-def export_result(order, file_path):
+def export_result(order, file_path, db, switch_costs):
     """Exports result to excel
     """
 
-    data = read_data(file_path)
+    data = read_data(file_path, db=db, filter_columns=False)
+    cost_series = read_data(file_path, db=db, cost=True)
 
     order = pd.Series(order).unique()
-    to_change = data.loc[data['CPC'].isin(order)]
-    remain_same = data.loc[~data['CPC'].isin(order)]
-    to_change = to_change.set_index('CPC').loc[order].reset_index().reset_index()
-    to_change['index'] = to_change['index']+1
+    to_change = data.loc[pd.Index(order)].copy()
+    remain_same = data.drop(pd.Index(order), axis=0)
+    to_change = to_change.reset_index().reset_index()
+    to_change['index'] = to_change['index']+order[0]
 
-    new_data = remain_same.append(to_change, sort=False)
-    new_data = new_data.sort_values('Ordinamento')
-    new_data['index'] = new_data['index'].fillna(new_data['Ordinamento']).astype(int)
-    
-    new_data = new_data.drop('Ordinamento', axis=1)
-    new_data = new_data.rename(columns={'index': 'Ordinamento'})
+    new_data = remain_same.reset_index().append(to_change, sort=False)
+
+    new_data = add_cost(new_data, cost_series, switch_costs)
+
+    new_data = new_data.sort_values('prog')
+    new_data['index'] = new_data['index'].fillna(new_data['prog']).astype(int)    
+    new_data = new_data.drop('prog', axis=1)
+    new_data = new_data.rename(columns={'index': 'prog'})
 
     new_data = new_data[
-        ['Ordinamento', 'CPC'] + 
-        [col for col in new_data.columns if col not in ['Ordinamento', 'CPC']]]
-    new_data = new_data.replace(0, pd.np.nan)
+        ['prog'] + 
+        [col for col in new_data.columns if col not in ['prog']]]
+    new_data = new_data.sort_values('prog')
 
     book = load_workbook(file_path)
-    if 'results' in book.get_sheet_names():
-        book.remove_sheet(book.get_sheet_by_name('results'))
+    if 'results' in book.sheetnames:
+        book.remove(book['results'])
         book.save(file_path)
         book = load_workbook(file_path)
     
@@ -161,16 +202,22 @@ def export_result(order, file_path):
     writer.save()
 
 
-if __name__=='__main__':
-    
-    cost = {'A': 10, 
-            'C': 7,
-            'Carta': 5, 
-            'TipoColori': 7,
-            }
+def add_cost(new_data, cost_series, switch_costs):
+    cost = cost_series.loc['nrcol', ['ValoreCostoCambio', 'CambioManica']].sum()
+    new_data = new_data.set_index('prog')
 
-    # row_from = 1  # riordina da qui
-    # row_until = 15  # riordina fino a 
+    for i in range(1, len(new_data)):
+        idx = new_data.index[i]
+        idx_prev = new_data.index[i-1]
+        if (idx_prev, idx) in switch_costs:
+            new_data.loc[idx, '_c_for'] = switch_costs[(idx_prev, idx)]
+    
+    new_data['_c_for'] = new_data['_c_for'] + new_data['nrcol']*cost 
+    new_data = new_data.reset_index()
+    return new_data
+
+
+if __name__=='__main__':
     
     file_path = input('Path del file Excel: ')
     if file_path=='':
@@ -180,13 +227,12 @@ if __name__=='__main__':
         else:
             # unfrozen
             dir_ = os.path.dirname(os.path.realpath(__file__))
-        file_path = os.path.join(dir_, 'Ordinamento.xlsx')
+        file_path = os.path.join(dir_, 'nuovo.xlsx')
         print(file_path)
 
     row_from = int(input('Specificare riga di inizio: '))
     row_until = int(input('Specificare riga di fine: '))
-    
 
-    order = solve_problem(file_path, cost, row_from, row_until)
-    export_result(order, file_path)    
+    order = solve_problem(file_path, row_from=row_from, row_until=row_until)
+        
 
