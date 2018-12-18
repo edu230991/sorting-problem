@@ -1,11 +1,19 @@
 import pandas as pd
-import itertools
 import sys
+import os
 import time
 
 from pulp import *
 from openpyxl import load_workbook
+from itertools import permutations
 
+
+"""
+Driver download here:
+https://www.microsoft.com/en-us/download/details.aspx?id=54920
+To clean installation from 32 bit software:
+https://support.microsoft.com/en-us/help/17588/fix-problems-that-block-programs-from-being-installed-or-removed
+"""
 
 def read_data(file_path, db=False, cost=False, filter_columns=True):
     if db:
@@ -32,42 +40,54 @@ def read_data(file_path, db=False, cost=False, filter_columns=True):
         return data
 
 
-def calculate_switch_costs(data, file_path, db):
+def calculate_switch_costs(data, file_path, db, all_comb=True):
     """calculates cost for switching between any two configurations
     """
 
     cost_series = read_data(file_path, db=db, cost=True)
-
     switch_costs = {}
-    for cpc1, row1 in data.iterrows():
-        for cpc2, row2 in data.iterrows():
-            # cost is zero if rows are identical, else depends on column
-            if cpc1!=cpc2:
-                row1_copy = row1.fillna(row2)
-                row2_copy = row2.fillna(row1)
 
-                switch_cost = ((~(row1_copy==row2_copy))*1*cost_series[
-                    'ValoreCostoCambio']).sum()
-                
-                # handle nans
-                with_nans = (pd.isnull(row1) | pd.isnull(row2))
-                
-                if with_nans.any():
-                    sel_1 = row1[row1.index[with_nans]]
-                    sel_2 = row2[row2.index[with_nans]]
+    data = data.reset_index()
+    if all_comb:
+        iterlist = permutations(data.index.tolist(), 2)
+    else:
+        iterlist = [(data.index[i-1], data.index[i]) 
+                    for i in range(1, len(data))]
 
-                    if ((pd.isnull(sel_1).any()) & 
-                        (not pd.isnull(sel_2).any())):
-                        # riempi 
-                        switch_cost += cost_series.loc[row1.index[with_nans], 
-                                                    'Riempi'].sum()
-                    elif ((pd.isnull(sel_2).any()) & 
-                          (not pd.isnull(sel_1).any())):
-                        # svuota 
-                        switch_cost += cost_series.loc[row2.index[with_nans], 
-                                                    'Svuota'].sum()               
-                
-                switch_costs[(row1.name, row2.name)] = switch_cost 
+    for cpc1, cpc2 in iterlist:
+        try:
+            row1 = data.loc[cpc1]
+            row2 = data.loc[cpc2]
+
+            prog1 = row1['prog']
+            prog2 = row2['prog']
+            row1 = row1.drop('prog')
+            row2 = row2.drop('prog')
+            row1_copy = row1.fillna(row2)
+            row2_copy = row2.fillna(row1)
+
+            switch_cost = ((~(row1_copy==row2_copy))*1*cost_series[
+                'ValoreCostoCambio']).sum()
+            
+            # handle nans
+            with_nans = (pd.isnull(row1) | pd.isnull(row2))
+            if with_nans.any():
+                sel_1 = row1[row1.index[with_nans]]
+                sel_2 = row2[row2.index[with_nans]]
+
+                if ((pd.isnull(sel_1).any()) & 
+                    (not pd.isnull(sel_2).any())):
+                    # riempi 
+                    switch_cost += cost_series.loc[row1.index[with_nans], 
+                                                'Riempi'].sum()
+                elif ((pd.isnull(sel_2).any()) & 
+                        (not pd.isnull(sel_1).any())):
+                    # svuota 
+                    switch_cost += cost_series.loc[row2.index[with_nans], 
+                                                'Svuota'].sum()               
+        except:
+            import ipdb; ipdb.set_trace()    
+        switch_costs[(prog1, prog2)] = switch_cost 
 
     return switch_costs
 
@@ -136,11 +156,16 @@ def solve_problem(file_path, row_from=None, row_until=None, source=None, target=
     switch_costs = calculate_switch_costs(data, file_path, db)
     prob, var_dict = create_problem_binary(data, switch_costs, source=source, target=target)
     start = time.time()
-    prob.solve()  # takes kwargs, check solve_CBC
+    prob.solve(PULP_CBC_CMD(maxSeconds=5*60, 
+                            fracGap = 0.01))  # takes kwargs, check solve_CBC
     
     print("Status:", LpStatus[prob.status])
     print("Elapsed", round(time.time()-start, 2), "seconds")
 
+    for file in os.listdir():
+        if (('.mps' in file) or ('.sol' in file)):
+            os.remove(file)
+    
     sol = pd.DataFrame(
         [[couple[0], couple[1], var_dict[couple].value()] for couple in var_dict],
         columns=['da', 'a', 'value'])
@@ -154,8 +179,6 @@ def solve_problem(file_path, row_from=None, row_until=None, source=None, target=
         next_value = sol.loc[sol.da==order[-1], 'a'].values[0]
         order.append(next_value)
 
-    print('Ordine ottimale:')
-    print(order)
     print('Costo minimo:', prob.objective.value())
 
     export_result(order, file_path, db, switch_costs)
@@ -188,7 +211,9 @@ def export_result(order, file_path, db, switch_costs):
         ['prog'] + 
         [col for col in new_data.columns if col not in ['prog']]]
     new_data = new_data.sort_values('prog')
+    save_file(file_path, new_data)
 
+def save_file(file_path, new_data):
     book = load_workbook(file_path)
     if 'results' in book.sheetnames:
         book.remove(book['results'])
@@ -204,7 +229,6 @@ def export_result(order, file_path, db, switch_costs):
 
 def add_cost(new_data, cost_series, switch_costs):
     cost = cost_series.loc['nrcol', ['ValoreCostoCambio', 'CambioManica']].sum()
-    new_data = new_data.set_index('prog')
 
     for i in range(1, len(new_data)):
         idx = new_data.index[i]
@@ -215,6 +239,15 @@ def add_cost(new_data, cost_series, switch_costs):
     new_data['_c_for'] = new_data['_c_for'] + new_data['nrcol']*cost 
     new_data = new_data.reset_index()
     return new_data
+
+
+def calculate_cost_unsorted(file_path):
+    db = ('accdb' in file_path)
+    data = read_data(file_path, db=db, filter_columns=False)
+    cost_series = read_data(file_path, db=db, cost=True)
+    switch_costs = calculate_switch_costs(data, file_path, db, all_comb=False)
+    data = add_cost(data, cost_series, switch_costs)
+    save_file(file_path, data)
 
 
 if __name__=='__main__':
@@ -230,9 +263,9 @@ if __name__=='__main__':
         file_path = os.path.join(dir_, 'nuovo.xlsx')
         print(file_path)
 
-    row_from = int(input('Specificare riga di inizio: '))
-    row_until = int(input('Specificare riga di fine: '))
+    # row_from = int(input('Specificare riga di inizio: '))
+    # row_until = int(input('Specificare riga di fine: '))
 
-    order = solve_problem(file_path, row_from=row_from, row_until=row_until)
+    # order = solve_problem(file_path, row_from=row_from, row_until=row_until)
         
-
+    calculate_cost_unsorted(file_path)
