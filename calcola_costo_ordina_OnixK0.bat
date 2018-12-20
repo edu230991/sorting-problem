@@ -1,0 +1,1 @@
+solveproblem.exe OnixK0 cost

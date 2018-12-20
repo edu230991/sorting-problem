@@ -1,0 +1,1 @@
+solveproblem.exe Diamond cost
