@@ -3,9 +3,13 @@ import os
 
 from cx_Freeze import setup, Executable
 
+
+files = [file for file in os.listdir() if (('.bat' in file) or ('accdb' in file))]
+
 build_exe_options = {
     "packages": ["os", "pandas", "pulp", "numpy", "pandas_datareader", "openpyxl"],
-    "includes": []}
+    "includes": [],
+    "include_files": files}
 
 # GUI applications require a different base on Windows (the default is for a
 # console application).

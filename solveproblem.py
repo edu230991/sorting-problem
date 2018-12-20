@@ -3,17 +3,19 @@ import sys
 import os
 import time
 import pyodbc
+import decimal
 
 from pulp import *
 from openpyxl import load_workbook
 from itertools import permutations
-
+from tqdm import tqdm
 
 """
 Driver download here:
 https://www.microsoft.com/en-us/download/details.aspx?id=54920
 To clean installation from 32 bit software:
 https://support.microsoft.com/en-us/help/17588/fix-problems-that-block-programs-from-being-installed-or-removed
+Careful with current Excel installation
 """
 
 
@@ -42,10 +44,15 @@ def read_data_from_access(path, table):
     return df
 
 
-def read_data(file_path, db=False, cost=False, filter_columns=True):
+def read_data(file_path, macchina=None, db=False, cost=False, filter_columns=True):
     if db:
-        data = read_data_from_access(path, 'Q_EstraiPerOrdinamento')
-        columns_data = read_data_from_access(path, 'Variabili')
+        data = read_data_from_access(file_path, 'Q_EstraiPerOrdinamento')
+        columns_data = read_data_from_access(file_path, 'VariabiliMacchina')
+        if macchina is not None:
+            data = data.loc[data['Macchina']==macchina]
+            columns_data = columns_data.loc[columns_data['Macchina']==macchina]
+            data.drop('Macchina', axis=1, inplace=True)
+            columns_data.drop('Macchina', axis=1, inplace=True)
     else:
         file_obj = pd.ExcelFile(file_path)
         columns_data = pd.read_excel(file_obj, 'Variabili')
@@ -69,11 +76,11 @@ def read_data(file_path, db=False, cost=False, filter_columns=True):
         return data
 
 
-def calculate_switch_costs(data, file_path, db, all_comb=True):
+def calculate_switch_costs(data, file_path, db, macchina=None, all_comb=True):
     """calculates cost for switching between any two configurations
     """
 
-    cost_series = read_data(file_path, db=db, cost=True)
+    cost_series = read_data(file_path, db=db, macchina=macchina, cost=True)
     switch_costs = {}
 
     data = data.reset_index()
@@ -172,20 +179,20 @@ def create_problem_binary(data, switch_costs, source=123, target=127):
     return prob, var_dict
 
 
-def solve_problem(file_path, row_from=None, row_until=None, source=None, target=None):
+def solve_problem(file_path, max_sec=300, macchina=None, row_from=None, row_until=None, source=None, target=None):
     """solves problem given cost and start-end
     """
 
     db = ('accdb' in file_path)
-    data = read_data(file_path, db=db)
+    data = read_data(file_path, db=db, macchina=macchina)
 
     if source is None:
         data = data.loc[row_from:row_until].copy()
     print(f'Sorting {len(data)} rows')
-    switch_costs = calculate_switch_costs(data, file_path, db)
+    switch_costs = calculate_switch_costs(data, file_path, db=db, macchina=macchina)
     prob, var_dict = create_problem_binary(data, switch_costs, source=source, target=target)
     start = time.time()
-    prob.solve(PULP_CBC_CMD(maxSeconds=5*60, 
+    prob.solve(PULP_CBC_CMD(maxSeconds=max_sec, 
                             fracGap = 0.01))  # takes kwargs, check solve_CBC
     
     print("Status:", LpStatus[prob.status])
@@ -210,18 +217,17 @@ def solve_problem(file_path, row_from=None, row_until=None, source=None, target=
 
     print('Costo minimo:', prob.objective.value())
 
-    export_result(order, file_path, db, switch_costs)
+    export_result(order, file_path, db, switch_costs, macchina=macchina)
     return True
 
 
-def export_result(order, file_path, db, switch_costs):
+def export_result(order, file_path, db, switch_costs, macchina=None):
     """Exports result to excel
     """
 
-    data = read_data(file_path, db=db, filter_columns=False)
-    cost_series = read_data(file_path, db=db, cost=True)
+    data = read_data(file_path, db=db, filter_columns=False, macchina=macchina)
+    cost_series = read_data(file_path, db=db, cost=True, macchina=macchina)
 
-    order = pd.Series(order).unique()
     to_change = data.loc[pd.Index(order)].copy()
     remain_same = data.drop(pd.Index(order), axis=0)
     to_change = to_change.reset_index().reset_index()
@@ -230,71 +236,122 @@ def export_result(order, file_path, db, switch_costs):
     new_data = remain_same.reset_index().append(to_change, sort=False)
 
     new_data = add_cost(new_data, cost_series, switch_costs)
-
-    new_data = new_data.sort_values('prog')
     new_data['index'] = new_data['index'].fillna(new_data['prog']).astype(int)    
-    new_data = new_data.drop('prog', axis=1)
-    new_data = new_data.rename(columns={'index': 'prog'})
-
-    new_data = new_data[
-        ['prog'] + 
-        [col for col in new_data.columns if col not in ['prog']]]
-    new_data = new_data.sort_values('prog')
-    save_file(file_path, new_data)
-
-def save_file(file_path, new_data):
-    book = load_workbook(file_path)
-    if 'results' in book.sheetnames:
-        book.remove(book['results'])
-        book.save(file_path)
-        book = load_workbook(file_path)
     
-    writer = pd.ExcelWriter(file_path, engine='openpyxl')
-    writer.book = book
+    if db:
+        new_data = new_data.rename(columns={'index': 'new_prog'})
+        new_data = new_data.rename(columns={'prog': 'old_prog'})
+        write_order_to_db(file_path, new_data, macchina)
+    else:
+        new_data.drop('prog', axis=1, inplace=True)
+        new_data.rename(columns={'index': 'prog'}, inplace=True)
+        new_data = new_data[
+            ['prog'] + 
+            [col for col in new_data.columns if col not in ['prog']]]
+        new_data.so
+        save_file(file_path, new_data)
 
-    new_data.to_excel(writer, 'results', index=False)
-    writer.save()
+
+def write_order_to_db(file_path, new_data, macchina):
+    changed = new_data.loc[new_data['new_prog']!=new_data['old_prog']].copy()
+    string = (r'Driver={Microsoft Access Driver (*.mdb, *.accdb)};'+
+              'DBQ=' + file_path)
+    conn = pyodbc.connect(string)
+    cursor = conn.cursor()
+
+    for idx, row in tqdm(changed.iterrows()):
+        query = f"""UPDATE Q_EstraiPerOrdinamento
+            SET Prog={row['new_prog']} where (
+                Macchina='{macchina}' and 
+                Prog={row['old_prog']}
+            )"""
+        cursor.execute(query)
+    conn.commit()
+    conn.close()
+
+
+def write_cost_to_db(file_path, macchina, data):
+    string = (r'Driver={Microsoft Access Driver (*.mdb, *.accdb)};'+
+              'DBQ=' + file_path)
+    conn = pyodbc.connect(string)
+    cursor = conn.cursor()
+
+    data['_c_for'] = data['_c_for'].fillna(0)
+    for prog in tqdm(range(len(data))):
+        query = (f"UPDATE Q_EstraiPerOrdinamento " + 
+                 f"SET _C_for={data.iloc[prog]['_c_for']} where (" + 
+                 f"Macchina='{macchina}' and " +
+                 f"Prog={data.index[prog]})")
+        cursor.execute(query)        
+    conn.commit()
+    conn.close()
+
+
+def save_file(file_path, new_data, db=False):
+    if db:
+        pass
+    else:
+        book = load_workbook(file_path)
+        if 'results' in book.sheetnames:
+            book.remove(book['results'])
+            book.save(file_path)
+            book = load_workbook(file_path)
+        
+        writer = pd.ExcelWriter(file_path, engine='openpyxl')
+        writer.book = book
+
+        new_data.to_excel(writer, 'results', index=False)
+        writer.save()
 
 
 def add_cost(new_data, cost_series, switch_costs):
     cost = cost_series.loc['nrcol', ['ValoreCostoCambio', 'CambioManica']].sum()
 
-    for i in range(1, len(new_data)):
+    for i in tqdm(range(1, len(new_data))):
         idx = new_data.index[i]
         idx_prev = new_data.index[i-1]
         if (idx_prev, idx) in switch_costs:
             new_data.loc[idx, '_c_for'] = switch_costs[(idx_prev, idx)]
-    
-    new_data['_c_for'] = new_data['_c_for'] + new_data['nrcol']*cost 
-    new_data = new_data.reset_index()
+
+    new_data['_c_for'] = new_data['_c_for'] + new_data['nrcol'].astype(float)*cost 
     return new_data
 
 
-def calculate_cost_unsorted(file_path):
+def calculate_cost_unsorted(file_path, macchina):
     db = ('accdb' in file_path)
-    data = read_data(file_path, db=db, filter_columns=False)
-    cost_series = read_data(file_path, db=db, cost=True)
-    switch_costs = calculate_switch_costs(data, file_path, db, all_comb=False)
+    data = read_data(file_path, db=db, filter_columns=False, macchina=macchina)
+    cost_series = read_data(file_path, db=db, cost=True, macchina=macchina)
+    switch_costs = calculate_switch_costs(data, file_path, db, macchina=macchina, all_comb=False)
     data = add_cost(data, cost_series, switch_costs)
-    save_file(file_path, data)
+
+    if db:
+        write_cost_to_db(file_path, macchina, data)
+    else:
+        save_file(file_path, data)
 
 
 if __name__=='__main__':
     
-    file_path = input('Path del file Excel: ')
-    if file_path=='':
-        if getattr(sys, 'frozen', False):
-            # frozen
-            dir_ = os.path.dirname(sys.executable)
-        else:
-            # unfrozen
-            dir_ = os.path.dirname(os.path.realpath(__file__))
-        file_path = os.path.join(dir_, 'nuovo.xlsx')
-        print(file_path)
+    if getattr(sys, 'frozen', False):
+        # frozen
+        dir_ = os.path.dirname(sys.executable)
+    else:
+        # unfrozen
+        dir_ = os.path.dirname(os.path.realpath(__file__))
+    file_path = os.path.join(dir_, 'DbOrdinamento.accdb')
+    print(file_path)
 
-    # row_from = int(input('Specificare riga di inizio: '))
-    # row_until = int(input('Specificare riga di fine: '))
+    if len(sys.argv)>1:
+        arguments = sys.argv[1:]
+        macchina = arguments[0]
+        task = arguments[1]  # "order" or "cost"
 
-    # order = solve_problem(file_path, row_from=row_from, row_until=row_until)
-        
-    calculate_cost_unsorted(file_path)
+        if task=='order':      
+            max_sec = int(arguments[2])      
+            row_from = int(input('Specificare ordinamento di inizio: '))
+            row_until = int(input('Specificare ordinamento di fine (escluso): '))
+            order = solve_problem(
+                file_path, macchina=macchina, 
+                row_from=row_from, row_until=row_until, max_sec=max_sec)
+        elif task=='cost':
+            calculate_cost_unsorted(file_path, macchina)
