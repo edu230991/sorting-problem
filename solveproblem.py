@@ -19,7 +19,7 @@ Careful with current Excel installation
 """
 
 
-def read_data_from_access(path, table):
+def read_data_from_access(path, table, query=None):
     """
     reads table from provided access db path into pandas dataframe
     """
@@ -28,7 +28,8 @@ def read_data_from_access(path, table):
     conn = pyodbc.connect(string)
     cursor = conn.cursor()
 
-    query = f'select * from {table}'  # Q_EstraiPerOrdinamento, Variabili
+    if query is None:
+        query = f'select * from {table}'  # Q_EstraiPerOrdinamento, Variabili
     cursor.execute(query)
 
     data = cursor.fetchall()
@@ -49,8 +50,8 @@ def read_data(file_path, macchina=None, db=False, cost=False, filter_columns=Tru
         data = read_data_from_access(file_path, 'Q_EstraiPerOrdinamento')
         columns_data = read_data_from_access(file_path, 'VariabiliMacchina')
         if macchina is not None:
-            data = data.loc[data['Macchina']==macchina]
-            columns_data = columns_data.loc[columns_data['Macchina']==macchina]
+            data = data.loc[data['Macchina']==macchina].copy().sort_values('Prog')
+            columns_data = columns_data.loc[columns_data['Macchina']==macchina].copy()
             data.drop('Macchina', axis=1, inplace=True)
             columns_data.drop('Macchina', axis=1, inplace=True)
     else:
@@ -65,6 +66,14 @@ def read_data(file_path, macchina=None, db=False, cost=False, filter_columns=Tru
         columns_data['ConsideraInOttimizzazione 1/0']==1, 
         'Variabile'].tolist()
     data = data.set_index('prog')
+    data['nrcol'] = data['nrcol'].astype(float)
+
+    for col in data.columns:
+        if type(data[col].iloc[0])==str:
+            data[col] = data[col].fillna('None')
+        else:
+            data[col] = data[col].fillna(0)
+
     if filter_columns:
         data = data[to_consider].copy()
 
@@ -146,7 +155,6 @@ def create_problem_binary(data, switch_costs, source=123, target=127):
         var_dict[(cpc1, cpc2)] = x
     
     dummy_dict = {node: LpVariable(f"dummy_{node}", None, None, LpInteger) for node in nodes}
-
     prob += lpSum([switch_costs[couple]*var_dict[couple] for couple in var_dict])
 
     for i, j in graph_edges:
@@ -189,6 +197,7 @@ def solve_problem(file_path, max_sec=300, macchina=None, row_from=None, row_unti
     if source is None:
         data = data.loc[row_from:row_until].copy()
     print(f'Sorting {len(data)} rows')
+    
     switch_costs = calculate_switch_costs(data, file_path, db=db, macchina=macchina)
     prob, var_dict = create_problem_binary(data, switch_costs, source=source, target=target)
     start = time.time()
@@ -202,23 +211,24 @@ def solve_problem(file_path, max_sec=300, macchina=None, row_from=None, row_unti
         if (('.mps' in file) or ('.sol' in file)):
             os.remove(file)
     
-    sol = pd.DataFrame(
-        [[couple[0], couple[1], var_dict[couple].value()] for couple in var_dict],
-        columns=['da', 'a', 'value'])
-    sol = sol.loc[sol.value>0]
-    
-    if source is None:
-        source = data.index[0]
-    order = [source]
+    if prob.status==1:
+        sol = pd.DataFrame(
+            [[couple[0], couple[1], var_dict[couple].value()] for couple in var_dict],
+            columns=['da', 'a', 'value'])
+        sol = sol.loc[sol.value>0]
+        
+        if source is None:
+            source = data.index[0]
+        order = [source]
 
-    while len(order)<=len(sol):
-        next_value = sol.loc[sol.da==order[-1], 'a'].values[0]
-        order.append(next_value)
+        while len(order)<=len(sol):
+            next_value = sol.loc[sol.da==order[-1], 'a'].values[0]
+            order.append(next_value)
 
-    print('Costo minimo:', prob.objective.value())
+        print('Costo minimo:', prob.objective.value())
 
-    export_result(order, file_path, db, switch_costs, macchina=macchina)
-    return True
+        export_result(order, file_path, db, switch_costs, macchina=macchina)
+        return True
 
 
 def export_result(order, file_path, db, switch_costs, macchina=None):
@@ -232,15 +242,17 @@ def export_result(order, file_path, db, switch_costs, macchina=None):
     remain_same = data.drop(pd.Index(order), axis=0)
     to_change = to_change.reset_index().reset_index()
     to_change['index'] = to_change['index']+order[0]
-
     new_data = remain_same.reset_index().append(to_change, sort=False)
 
+    # check if new index contains also old numbers which would cause duplicates
     new_data = add_cost(new_data, cost_series, switch_costs)
+    import ipdb; ipdb.set_trace()
     new_data['index'] = new_data['index'].fillna(new_data['prog']).astype(int)    
     
     if db:
         new_data = new_data.rename(columns={'index': 'new_prog'})
         new_data = new_data.rename(columns={'prog': 'old_prog'})
+        import ipdb; ipdb.set_trace()
         write_order_to_db(file_path, new_data, macchina)
     else:
         new_data.drop('prog', axis=1, inplace=True)
@@ -253,17 +265,46 @@ def export_result(order, file_path, db, switch_costs, macchina=None):
 
 
 def write_order_to_db(file_path, new_data, macchina):
+    
     changed = new_data.loc[new_data['new_prog']!=new_data['old_prog']].copy()
     string = (r'Driver={Microsoft Access Driver (*.mdb, *.accdb)};'+
               'DBQ=' + file_path)
     conn = pyodbc.connect(string)
     cursor = conn.cursor()
-
+    import ipdb; ipdb.set_trace()
     for idx, row in tqdm(changed.iterrows()):
+
+        # query_select = f"""select * from Q_EstraiPerOrdinamento
+        #                 where 
+        #                     (
+        #                         Macchina='{macchina}' and 
+        #                         Prog={row['old_prog']} and 
+        #                         Var_K='{row['var_k']}' and 
+        #                         NumeroCom={row['numerocom']} and 
+        #                         IDRIGA={row['idriga']} and 
+        #                         Fascia='{row['fascia']}' and 
+        #                         NrCol='{row['nrcol']}' and 
+        #                         QTS='{row['qts']}' and
+        #                         S='{row['s']}' and
+        #                         T='{row['t']}' and
+        #                         DescCol01='{row['desccol01']}'
+        #                     )"""
+        # sel = read_data_from_access(file_path, 'Q_EstraiPerOrdinamento', query_select)
+        
         query = f"""UPDATE Q_EstraiPerOrdinamento
-            SET Prog={row['new_prog']} where (
+            SET Prog={row['new_prog']} where 
+            (
                 Macchina='{macchina}' and 
-                Prog={row['old_prog']}
+                Prog={row['old_prog']} and 
+                Var_K='{row['var_k']}' and 
+                NumeroCom={row['numerocom']} and 
+                IDRIGA={row['idriga']} and 
+                Fascia='{row['fascia']}' and 
+                NrCol='{row['nrcol']}' and 
+                QTS='{row['qts']}' and
+                S='{row['s']}' and
+                T='{row['t']}' and
+                DescCol01='{row['desccol01']}'
             )"""
         cursor.execute(query)
     conn.commit()
@@ -345,13 +386,18 @@ if __name__=='__main__':
         arguments = sys.argv[1:]
         macchina = arguments[0]
         task = arguments[1]  # "order" or "cost"
+    else:
+        macchina = 'Diamond'
+        task = 'order'
+        arguments = [macchina, task, 500]
+    
+    if task=='order':      
+        max_sec = int(arguments[2])      
+        row_from = int(input('Specificare ordinamento di inizio: '))
+        row_until = int(input('Specificare ordinamento di fine (escluso): '))
+        order = solve_problem(
+            file_path, macchina=macchina, 
+            row_from=row_from, row_until=row_until, max_sec=max_sec)
+    elif task=='cost':
+        calculate_cost_unsorted(file_path, macchina)
 
-        if task=='order':      
-            max_sec = int(arguments[2])      
-            row_from = int(input('Specificare ordinamento di inizio: '))
-            row_until = int(input('Specificare ordinamento di fine (escluso): '))
-            order = solve_problem(
-                file_path, macchina=macchina, 
-                row_from=row_from, row_until=row_until, max_sec=max_sec)
-        elif task=='cost':
-            calculate_cost_unsorted(file_path, macchina)
