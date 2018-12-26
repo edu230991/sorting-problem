@@ -70,9 +70,9 @@ def read_data(file_path, macchina=None, db=False, cost=False, filter_columns=Tru
 
     for col in data.columns:
         if type(data[col].iloc[0])==str:
-            data[col] = data[col].fillna('None')
+            data[col] = data[col].fillna('NULL')
         else:
-            data[col] = data[col].fillna(0)
+            data[col] = data[col].fillna(-99)
 
     if filter_columns:
         data = data[to_consider].copy()
@@ -235,10 +235,12 @@ def export_result(order, file_path, db, switch_costs, macchina=None):
     """Exports result to excel
     """
 
+    order = pd.Series(order).unique().tolist()
+
     data = read_data(file_path, db=db, filter_columns=False, macchina=macchina)
     cost_series = read_data(file_path, db=db, cost=True, macchina=macchina)
 
-    to_change = data.loc[pd.Index(order)].copy()
+    to_change = data.loc[pd.Index(order, name='prog')].copy()
     remain_same = data.drop(pd.Index(order), axis=0)
     to_change = to_change.reset_index().reset_index()
     to_change['index'] = to_change['index']+order[0]
@@ -246,13 +248,11 @@ def export_result(order, file_path, db, switch_costs, macchina=None):
 
     # check if new index contains also old numbers which would cause duplicates
     new_data = add_cost(new_data, cost_series, switch_costs)
-    import ipdb; ipdb.set_trace()
     new_data['index'] = new_data['index'].fillna(new_data['prog']).astype(int)    
     
     if db:
         new_data = new_data.rename(columns={'index': 'new_prog'})
         new_data = new_data.rename(columns={'prog': 'old_prog'})
-        import ipdb; ipdb.set_trace()
         write_order_to_db(file_path, new_data, macchina)
     else:
         new_data.drop('prog', axis=1, inplace=True)
@@ -267,44 +267,38 @@ def export_result(order, file_path, db, switch_costs, macchina=None):
 def write_order_to_db(file_path, new_data, macchina):
     
     changed = new_data.loc[new_data['new_prog']!=new_data['old_prog']].copy()
+    changed['nrcol'] = changed['nrcol'].astype(int).astype(str)
+    
     string = (r'Driver={Microsoft Access Driver (*.mdb, *.accdb)};'+
               'DBQ=' + file_path)
     conn = pyodbc.connect(string)
     cursor = conn.cursor()
-    import ipdb; ipdb.set_trace()
-    for idx, row in tqdm(changed.iterrows()):
 
-        # query_select = f"""select * from Q_EstraiPerOrdinamento
-        #                 where 
-        #                     (
-        #                         Macchina='{macchina}' and 
-        #                         Prog={row['old_prog']} and 
-        #                         Var_K='{row['var_k']}' and 
-        #                         NumeroCom={row['numerocom']} and 
-        #                         IDRIGA={row['idriga']} and 
-        #                         Fascia='{row['fascia']}' and 
-        #                         NrCol='{row['nrcol']}' and 
-        #                         QTS='{row['qts']}' and
-        #                         S='{row['s']}' and
-        #                         T='{row['t']}' and
-        #                         DescCol01='{row['desccol01']}'
-        #                     )"""
-        # sel = read_data_from_access(file_path, 'Q_EstraiPerOrdinamento', query_select)
-        
+    for idx, row in tqdm(changed.iterrows()):
+        condition = []
+        for num in row:
+            if num in [-99, 'NULL']:
+                condition.append('is NULL')
+            else:
+                if type(num)==str:
+                    condition.append(f"='{num}'")
+                else:
+                    condition.append(f"={num}")
+
         query = f"""UPDATE Q_EstraiPerOrdinamento
             SET Prog={row['new_prog']} where 
             (
                 Macchina='{macchina}' and 
-                Prog={row['old_prog']} and 
-                Var_K='{row['var_k']}' and 
-                NumeroCom={row['numerocom']} and 
-                IDRIGA={row['idriga']} and 
-                Fascia='{row['fascia']}' and 
-                NrCol='{row['nrcol']}' and 
-                QTS='{row['qts']}' and
-                S='{row['s']}' and
-                T='{row['t']}' and
-                DescCol01='{row['desccol01']}'
+                Prog {condition[0]} and 
+                Var_K {condition[2]} and 
+                NumeroCom {condition[3]} and 
+                IDRIGA {condition[4]} and 
+                Fascia {condition[5]} and 
+                NrCol {condition[6]} and 
+                QTS {condition[7]} and
+                S {condition[8]} and
+                T {condition[9]} and
+                DescCol01 {condition[10]}
             )"""
         cursor.execute(query)
     conn.commit()
